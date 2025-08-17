@@ -1,0 +1,1 @@
+# LateFusionPipeline класс
