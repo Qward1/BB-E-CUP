@@ -531,9 +531,13 @@ class DataProcessor:
 
         # Заполняем пропуски
         inventory_cols = ['ItemVarietyCount', 'ItemAvailableCount']
+        seller_col = 'SellerID'
+
         for col in inventory_cols:
             if col in result_df.columns:
-                result_df[col] = result_df[col].fillna(1)
+                result_df[col] = result_df[col].fillna(
+                    result_df.groupby(seller_col)[col].transform('count')
+                )
 
         # Соотношение доступности к разнообразию
         result_df['availability_ratio'] = (
