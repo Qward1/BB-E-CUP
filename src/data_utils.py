@@ -109,7 +109,7 @@ class DataProcessor:
 
         return metadata
 
-    def extract_counterfeit_features(self, df: pd.DataFrame) -> pd.DataFrame:
+    def extract_counterfeit_features(self,metadata: pd.DataFrame) -> pd.DataFrame:
         """
         Функция для извлечения признаков для определения контрафакта
 
@@ -131,7 +131,7 @@ class DataProcessor:
         """
 
         # Создаем копию датафрейма
-        result_df = df.copy()
+        result_df = metadata.copy()
 
         # ========================================
         # 1. ПРИЗНАКИ ИЗ РЕЙТИНГОВ И ОТЗЫВОВ
@@ -272,11 +272,17 @@ class DataProcessor:
         # 3. ПРИЗНАКИ ИЗ ПРОДАЖ И ВОЗВРАТОВ
         # ========================================
 
+        #=======
+        # Заполнение пропусков у групп по 7,30,90 дней
+        #======
+        def skipping_day_categories(row,listday):
+            row[listday[0]] = row[listday[0]].fillna(0)
+            row[listday[1]] = row[listday[1]].fillna(row[listday[0]])
+            row[listday[2]] = row[listday[2]].fillna(row[listday[1]])
+            return row
         # Продажи
         sales_cols = ['item_count_sales7', 'item_count_sales30', 'item_count_sales90']
-        for col in sales_cols:
-            if col in result_df.columns:
-                result_df[col] = result_df[col].fillna(0)
+        metadata = metadata.apply(skipping_day_categories, axis=1, args=(sales_cols,))
 
         # Динамика продаж
         result_df['sales_velocity_7d'] = result_df['item_count_sales7'] / 7
@@ -295,9 +301,7 @@ class DataProcessor:
 
         # Возвраты
         returns_cols = ['item_count_returns7', 'item_count_returns30', 'item_count_returns90']
-        for col in returns_cols:
-            if col in result_df.columns:
-                result_df[col] = result_df[col].fillna(0)
+        metadata = metadata.apply(skipping_day_categories, axis=1, args=(returns_cols,))
 
         # Процент возвратов
         result_df['return_rate_7d'] = (
@@ -320,9 +324,7 @@ class DataProcessor:
 
         # Фейковые возвраты (очень подозрительно!)
         fake_returns_cols = ['item_count_fake_returns7', 'item_count_fake_returns30', 'item_count_fake_returns90']
-        for col in fake_returns_cols:
-            if col in result_df.columns:
-                result_df[col] = result_df[col].fillna(0)
+        metadata = metadata.apply(skipping_day_categories, axis=1, args=(fake_returns_cols,))
 
         # Доля фейковых возвратов
         result_df['fake_return_rate_7d'] = (
@@ -347,9 +349,7 @@ class DataProcessor:
 
         # GMV (Gross Merchandise Value)
         gmv_cols = ['GmvTotal7', 'GmvTotal30', 'GmvTotal90']
-        for col in gmv_cols:
-            if col in result_df.columns:
-                result_df[col] = result_df[col].fillna(0)
+        metadata = metadata.apply(skipping_day_categories, axis=1, args=(gmv_cols,))
 
         # Средний чек
         result_df['avg_order_value_7d'] = (
@@ -389,9 +389,7 @@ class DataProcessor:
         # Стоимость возвратов
         return_value_cols = ['ExemplarReturnedValueTotal7', 'ExemplarReturnedValueTotal30',
                              'ExemplarReturnedValueTotal90']
-        for col in return_value_cols:
-            if col in result_df.columns:
-                result_df[col] = result_df[col].fillna(0)
+        metadata = metadata.apply(skipping_day_categories, axis=1, args=(return_value_cols,))
 
         # Доля возвратов от GMV
         result_df['return_value_ratio_7d'] = (
@@ -453,15 +451,11 @@ class DataProcessor:
 
         # Принятые экземпляры
         accepted_cols = ['ExemplarAcceptedCountTotal7', 'ExemplarAcceptedCountTotal30', 'ExemplarAcceptedCountTotal90']
-        for col in accepted_cols:
-            if col in result_df.columns:
-                result_df[col] = result_df[col].fillna(0)
+        metadata = metadata.apply(skipping_day_categories, axis=1, args=(accepted_cols,))
 
         # Принятые заказы
         order_cols = ['OrderAcceptedCountTotal7', 'OrderAcceptedCountTotal30', 'OrderAcceptedCountTotal90']
-        for col in order_cols:
-            if col in result_df.columns:
-                result_df[col] = result_df[col].fillna(0)
+        metadata = metadata.apply(skipping_day_categories, axis=1, args=(order_cols,))
 
         # Среднее количество товаров в заказе
         result_df['items_per_order_7d'] = (
@@ -719,7 +713,7 @@ class DataProcessor:
         result_df[numeric_cols] = result_df[numeric_cols].fillna(0)
 
         # Подсчет новых признаков
-        original_cols = df.columns.tolist()
+        original_cols = metadata.columns.tolist()
         new_cols = [col for col in result_df.columns if col not in original_cols]
         # Вывод топ важных признаков
         print("\n📊 Key features for counterfeit detection:")
