@@ -130,8 +130,86 @@ class DataProcessor:
             DataFrame с исходными и новыми признаками
         """
 
+        # Заполнение brand_name
+        def fill_categorical_with_group_mode(df, target_col, group_col):
+            """
+            Заполняет пропуски в target_col модой по группам group_col.
+
+            df : pd.DataFrame
+                Исходный датасет
+            target_col : str
+                Столбец, где есть пропуски (например, 'brand_name')
+            group_col : str
+                Столбец для группировки (например, 'CommercialTypeName4')
+            """
+            # Находим моду по каждой группе
+            mode_per_group = (
+                df.groupby(group_col)[target_col]
+                .agg(lambda x: x.mode().iloc[0] if not x.mode().empty else np.nan)
+            )
+
+            # Заполняем пропуски по соответствующей группе
+            df[target_col] = df.apply(
+                lambda row: mode_per_group[row[group_col]] if pd.isna(row[target_col]) else row[target_col],
+                axis=1
+            )
+            return df
+
         # Создаем копию датафрейма
         result_df = metadata.copy()
+        # ========================================
+        # 7. ПРИЗНАКИ ИЗ ТЕКСТОВЫХ ПОЛЕЙ
+        # ========================================
+
+        # Обработка brand_name
+        if 'brand_name' in result_df.columns:
+            result_df['brand_is_clean'] = result_df['brand_name'].isna().astype(int)
+            result_df = fill_categorical_with_group_mode(result_df, target_col='brand_name',
+                                                         group_col='CommercialTypeName4')
+            result_df['brand_length'] = result_df['brand_name'].str.len()
+            result_df['brand_word_count'] = result_df['brand_name'].str.split().str.len()
+            result_df['brand_has_numbers'] = result_df['brand_name'].str.contains(r'\d', regex=True).astype(int)
+            result_df['brand_all_caps'] = (
+                    (result_df['brand_name'].str.isupper()) &
+                    (result_df['brand_length'] > 2)
+            ).astype(int)
+
+
+            # Подозрительные паттерны в бренде (включая ACTRUM из примера)
+            suspicious_patterns = ['ACTRUM', 'COPY', 'REPLICA', 'TYPE', 'STYLE', 'LIKE',
+                                   'АНАЛОГ', 'КОПИЯ', 'ТИП', 'ПОДОБНЫЙ']
+            pattern = '|'.join(suspicious_patterns)
+            result_df['suspicious_brand_pattern'] = (
+                result_df['brand_name'].str.upper().str.contains(pattern, regex=True, na=False)
+            ).astype(int)
+
+        # Обработка name_rus
+        if 'name_rus' in result_df.columns:
+            result_df['name_rus'] = result_df['name_rus'].fillna('').astype(str).str.strip()
+            result_df['name_length'] = result_df['name_rus'].str.len()
+            result_df['name_word_count'] = result_df['name_rus'].str.split().str.len()
+            result_df['name_has_dots'] = result_df['name_rus'].str.contains('\.\.\.', regex=True).astype(int)
+            result_df['has_name'] = (result_df['name_length'] > 0).astype(int)
+
+            # Обрезанное название (подозрительно)
+            result_df['name_truncated'] = result_df['name_rus'].str.endswith('...').astype(int)
+
+        # Обработка категории
+        if 'CommercialTypeName4' in result_df.columns:
+            result_df['CommercialTypeName4'] = result_df['CommercialTypeName4'].fillna('').astype(str).str.strip()
+            result_df['category_length'] = result_df['CommercialTypeName4'].str.len()
+            result_df['has_category'] = (result_df['CommercialTypeName4'] > 0).astype(int)
+
+        # Соответствие бренда и названия
+        if 'brand_name' in result_df.columns and 'name_rus' in result_df.columns:
+            def check_brand_in_name(row):
+                brand = str(row.get('brand_clean', '')).lower()
+                name = str(row.get('name_clean', '')).lower()
+                if brand and name and len(brand) > 2:
+                    return 1 if brand in name else 0
+                return 0
+
+            result_df['brand_name_match'] = result_df.apply(check_brand_in_name, axis=1)
 
         # ========================================
         # 1. ПРИЗНАКИ ИЗ РЕЙТИНГОВ И ОТЗЫВОВ
@@ -282,7 +360,7 @@ class DataProcessor:
             return row
         # Продажи
         sales_cols = ['item_count_sales7', 'item_count_sales30', 'item_count_sales90']
-        metadata = metadata.apply(skipping_day_categories, axis=1, args=(sales_cols,))
+        result_df = result_df.apply(skipping_day_categories, axis=1, args=(sales_cols,))
 
         # Динамика продаж
         result_df['sales_velocity_7d'] = result_df['item_count_sales7'] / 7
@@ -301,7 +379,7 @@ class DataProcessor:
 
         # Возвраты
         returns_cols = ['item_count_returns7', 'item_count_returns30', 'item_count_returns90']
-        metadata = metadata.apply(skipping_day_categories, axis=1, args=(returns_cols,))
+        result_df = result_df.apply(skipping_day_categories, axis=1, args=(returns_cols,))
 
         # Процент возвратов
         result_df['return_rate_7d'] = (
@@ -324,7 +402,7 @@ class DataProcessor:
 
         # Фейковые возвраты (очень подозрительно!)
         fake_returns_cols = ['item_count_fake_returns7', 'item_count_fake_returns30', 'item_count_fake_returns90']
-        metadata = metadata.apply(skipping_day_categories, axis=1, args=(fake_returns_cols,))
+        result_df = result_df.apply(skipping_day_categories, axis=1, args=(fake_returns_cols,))
 
         # Доля фейковых возвратов
         result_df['fake_return_rate_7d'] = (
@@ -349,7 +427,7 @@ class DataProcessor:
 
         # GMV (Gross Merchandise Value)
         gmv_cols = ['GmvTotal7', 'GmvTotal30', 'GmvTotal90']
-        metadata = metadata.apply(skipping_day_categories, axis=1, args=(gmv_cols,))
+        result_df = result_df.apply(skipping_day_categories, axis=1, args=(gmv_cols,))
 
         # Средний чек
         result_df['avg_order_value_7d'] = (
@@ -389,7 +467,7 @@ class DataProcessor:
         # Стоимость возвратов
         return_value_cols = ['ExemplarReturnedValueTotal7', 'ExemplarReturnedValueTotal30',
                              'ExemplarReturnedValueTotal90']
-        metadata = metadata.apply(skipping_day_categories, axis=1, args=(return_value_cols,))
+        result_df = result_df.apply(skipping_day_categories, axis=1, args=(return_value_cols,))
 
         # Доля возвратов от GMV
         result_df['return_value_ratio_7d'] = (
@@ -451,11 +529,11 @@ class DataProcessor:
 
         # Принятые экземпляры
         accepted_cols = ['ExemplarAcceptedCountTotal7', 'ExemplarAcceptedCountTotal30', 'ExemplarAcceptedCountTotal90']
-        metadata = metadata.apply(skipping_day_categories, axis=1, args=(accepted_cols,))
+        result_df = result_df.apply(skipping_day_categories, axis=1, args=(accepted_cols,))
 
         # Принятые заказы
         order_cols = ['OrderAcceptedCountTotal7', 'OrderAcceptedCountTotal30', 'OrderAcceptedCountTotal90']
-        metadata = metadata.apply(skipping_day_categories, axis=1, args=(order_cols,))
+        result_df = result_df.apply(skipping_day_categories, axis=1, args=(order_cols,))
 
         # Среднее количество товаров в заказе
         result_df['items_per_order_7d'] = (
@@ -479,9 +557,9 @@ class DataProcessor:
 
         # Обработка brand_name
         if 'brand_name' in result_df.columns:
-            result_df['brand_clean'] = result_df['brand_name'].fillna('').astype(str).str.strip()
-            result_df['brand_length'] = result_df['brand_clean'].str.len()
-            result_df['brand_word_count'] = result_df['brand_clean'].str.split().str.len()
+            result_df['brand_name'] = result_df['brand_name'].astype(str).str.strip()
+            result_df['brand_length'] = result_df['brand_name'].str.len()
+            result_df['brand_word_count'] = result_df['brand_name'].str.split().str.len()
             result_df['brand_has_numbers'] = result_df['brand_clean'].str.contains(r'\d', regex=True).astype(int)
             result_df['brand_all_caps'] = (
                     (result_df['brand_clean'].str.isupper()) &
@@ -732,4 +810,7 @@ class DataProcessor:
             if feat in result_df.columns:
                 print(f"  ✓ {feat}")
 
+        #ONEHOT
+        result_df = pd.get_dummies(result_df,columns=['brand_name', 'CommercialTypeName4'],
+                                                              drop_first=False)
         return result_df
