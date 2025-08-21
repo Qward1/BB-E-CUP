@@ -163,7 +163,16 @@ class DataProcessor:
 
         # Обработка brand_name
         if 'brand_name' in result_df.columns:
-            result_df['brand_is_clean'] = result_df['brand_name'].isna().astype(int)
+            result_df['brand_is_clean'] = (
+                    result_df['brand_name'].isna() |
+                    (result_df['brand_name'] == '') |
+                    (result_df['brand_name'].str.strip() == '')  # учитывает строки только с пробелами
+            ).astype(int)
+            result_df['brand_name'] = result_df['brand_name'].replace('', 'unknown')
+            result_df['brand_name'] = result_df['brand_name'].replace(r'^\s*$', 'unknown',
+                                                                      regex=True)  # для строк только с пробелами
+
+            # Теперь заполняем пропущенные значения с помощью групповой моды
             result_df = fill_categorical_with_group_mode(result_df, target_col='brand_name',
                                                          group_col='CommercialTypeName4')
             result_df['brand_length'] = result_df['brand_name'].str.len()
@@ -811,6 +820,7 @@ class DataProcessor:
                 print(f"  ✓ {feat}")
 
         #ONEHOT
-        result_df = pd.get_dummies(result_df,columns=['brand_name', 'CommercialTypeName4'],
-                                                              drop_first=False)
+        #result_df = pd.get_dummies(result_df,columns=['brand_name', 'CommercialTypeName4'],
+                                                              #drop_first=False)
+        result_df = result_df.drop("name_rus", axis= 1)
         return result_df
