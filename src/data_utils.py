@@ -109,7 +109,7 @@ class DataProcessor:
 
         return metadata
 
-    def extract_counterfeit_features(self,metadata: pd.DataFrame) -> pd.DataFrame:
+    def extract_counterfeit_features(metadata: pd.DataFrame) -> pd.DataFrame:
         """
         Функция для извлечения признаков для определения контрафакта
 
