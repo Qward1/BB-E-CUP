@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from typing import Optional, Union, List
+from typing import Optional, Union, Generator
 import torch
 from transformers import AutoTokenizer, AutoModel
 from sentence_transformers import SentenceTransformer
@@ -8,7 +8,7 @@ import re
 import gc
 from pathlib import Path
 import joblib
-from tqdm.auto import tqdm
+from tqdm import tqdm
 import warnings
 
 warnings.filterwarnings('ignore')
@@ -17,7 +17,7 @@ warnings.filterwarnings('ignore')
 class CPUOptimizedVectorizer:
     """
     Векторизатор оптимизированный для CPU и больших данных
-    Упрощенная версия без сохранения промежуточных чанков
+    Исправлена проблема с сохранением в parquet
     """
 
     def __init__(self, strategy: str = 'auto'):
@@ -71,7 +71,7 @@ class CPUOptimizedVectorizer:
                 ngram_range=(1, 2),
                 min_df=2,
                 max_df=0.95,
-                dtype=np.float32
+                dtype=np.float32  # Используем float32 для совместимости
             )
             self.svd = TruncatedSVD(n_components=300)
             self.embedding_dim = 300
@@ -149,12 +149,7 @@ class CPUOptimizedVectorizer:
     def encode_batch_balanced(self, texts: list) -> np.ndarray:
         """Кодирование через Sentence-BERT"""
         cleaned = [self.clean_text(t) for t in texts]
-        embeddings = self.model.encode(
-            cleaned,
-            batch_size=32,
-            show_progress_bar=False,
-            convert_to_numpy=True
-        )
+        embeddings = self.model.encode(cleaned, batch_size=32, show_progress_bar=False)
         return embeddings.astype(np.float32)
 
     def encode_batch_quality(self, texts: list, batch_size: int = 4) -> np.ndarray:
@@ -183,18 +178,8 @@ class CPUOptimizedVectorizer:
         result = np.vstack(embeddings) if embeddings else np.empty((0, self.embedding_dim))
         return result.astype(np.float32)
 
-    def encode(self, texts: Union[list, pd.Series], batch_size: int = 100, show_progress: bool = True) -> np.ndarray:
-        """
-        Универсальный метод кодирования
-
-        Args:
-            texts: Тексты для кодирования
-            batch_size: Размер батча
-            show_progress: Показывать прогресс-бар
-
-        Returns:
-            np.ndarray: Матрица эмбеддингов
-        """
+    def encode(self, texts: Union[list, pd.Series], batch_size: int = 100) -> np.ndarray:
+        """Универсальный метод кодирования"""
         if isinstance(texts, pd.Series):
             texts = texts.tolist()
         elif isinstance(texts, str):
@@ -202,13 +187,7 @@ class CPUOptimizedVectorizer:
 
         all_embeddings = []
 
-        # Создаем итератор с или без прогресс-бара
-        if show_progress:
-            iterator = tqdm(range(0, len(texts), batch_size), desc="Encoding batches")
-        else:
-            iterator = range(0, len(texts), batch_size)
-
-        for i in iterator:
+        for i in tqdm(range(0, len(texts), batch_size), desc="Encoding"):
             batch = texts[i:i + batch_size]
 
             try:
@@ -229,154 +208,183 @@ class CPUOptimizedVectorizer:
                 empty_embeddings = np.zeros((len(batch), self.embedding_dim), dtype=np.float32)
                 all_embeddings.append(empty_embeddings)
 
-            # Очистка памяти каждые 10 батчей
-            if (i // batch_size) % 10 == 0:
+            # Очистка памяти
+            if i % 1000 == 0:
                 gc.collect()
 
         return np.vstack(all_embeddings) if all_embeddings else np.empty((0, self.embedding_dim))
 
-    def process_dataframe(self,
-                          df: pd.DataFrame,
-                          text_column: str = 'description',
-                          batch_size: int = 100,
-                          add_to_original: bool = True) -> pd.DataFrame:
+    def process_large_file(self,
+                           file_path: str,
+                           text_column: str = 'description',
+                           chunksize: int = 10000,
+                           save_dir: str = 'embeddings/',
+                           save_format: str = 'csv') -> None:
         """
-        Обработка DataFrame и добавление эмбеддингов
+        Обработка большого файла по частям с сохранением на диск
 
         Args:
-            df: DataFrame для обработки
-            text_column: Название колонки с текстом
-            batch_size: Размер батча для обработки
-            add_to_original: Добавить эмбеддинги к исходному DataFrame
-
-        Returns:
-            pd.DataFrame: DataFrame с эмбеддингами
-        """
-        print(f"Processing DataFrame with {len(df)} rows")
-        print(f"Text column: {text_column}")
-
-        # Проверяем наличие колонки
-        if text_column not in df.columns:
-            raise ValueError(f"Column '{text_column}' not found in DataFrame. Available columns: {df.columns.tolist()}")
-
-        # Получаем тексты
-        texts = df[text_column].fillna('')
-
-        # Кодируем
-        print(f"Encoding texts using {self.strategy} strategy...")
-        embeddings = self.encode(texts, batch_size=batch_size)
-
-        # Создаем DataFrame с эмбеддингами
-        embed_cols = [f'embed_{i}' for i in range(embeddings.shape[1])]
-        embed_df = pd.DataFrame(
-            embeddings,
-            columns=embed_cols,
-            index=df.index,
-            dtype=np.float32
-        )
-
-        print(f"Created {len(embed_cols)} embedding columns")
-
-        # Возвращаем результат
-        if add_to_original:
-            result = pd.concat([df, embed_df], axis=1)
-            print(f"Final DataFrame shape: {result.shape}")
-            return result
-        else:
-            # Добавляем только ID если есть
-            if 'item_id' in df.columns:
-                embed_df.insert(0, 'item_id', df['item_id'].values)
-            return embed_df
-
-    def process_file(self,
-                     file_path: str,
-                     text_column: str = 'description',
-                     batch_size: int = 100,
-                     save_path: Optional[str] = None,
-                     save_format: str = 'parquet',
-                     add_to_original: bool = False) -> pd.DataFrame:
-        """
-        Обработка файла целиком
-
-        Args:
-            file_path: Путь к файлу (CSV или Parquet)
-            text_column: Название колонки с текстом
-            batch_size: Размер батча для обработки
-            save_path: Путь для сохранения результата (опционально)
+            file_path: Путь к CSV/Parquet файлу
+            text_column: Колонка с текстами
+            chunksize: Размер чанка
+            save_dir: Директория для сохранения
             save_format: Формат сохранения ('parquet' или 'csv')
-            add_to_original: Добавить эмбеддинги к исходным данным
-
-        Returns:
-            pd.DataFrame: DataFrame с эмбеддингами
         """
+        Path(save_dir).mkdir(exist_ok=True, parents=True)
+
         # Определяем формат файла
         file_ext = Path(file_path).suffix.lower()
 
-        print(f"Loading file: {file_path}")
+        print(f"Processing file: {file_path}")
+        print(f"File format: {file_ext}")
+        print(f"Save format: {save_format}")
 
-        # Загружаем файл
+        # Читаем файл по частям
         if file_ext == '.parquet':
-            df = pd.read_parquet(file_path)
-        elif file_ext in ['.csv', '.tsv']:
-            separator = '\t' if file_ext == '.tsv' else ','
-            df = pd.read_csv(file_path, sep=separator)
-        else:
-            raise ValueError(f"Unsupported file format: {file_ext}")
-
-        print(f"Loaded {len(df)} rows")
-
-        # Обрабатываем DataFrame
-        result_df = self.process_dataframe(
-            df,
-            text_column=text_column,
-            batch_size=batch_size,
-            add_to_original=add_to_original
-        )
-
-        # Сохраняем если указан путь
-        if save_path:
-            self._save_dataframe(result_df, save_path, save_format)
-
-        return result_df
-
-    def _save_dataframe(self, df: pd.DataFrame, save_path: str, save_format: str = 'parquet'):
-        """Сохранение DataFrame"""
-        Path(save_path).parent.mkdir(exist_ok=True, parents=True)
-
-        if save_format == 'parquet':
             try:
-                df.to_parquet(save_path, compression='snappy', engine='pyarrow')
-                print(f"Saved to {save_path} (parquet format)")
-            except Exception as e:
-                print(f"Failed to save as parquet with pyarrow: {e}")
-                try:
-                    df.to_parquet(save_path, compression='snappy', engine='fastparquet')
-                    print(f"Saved to {save_path} (parquet format with fastparquet)")
-                except Exception as e2:
-                    print(f"Failed to save as parquet: {e2}")
-                    # Fallback to CSV
-                    save_path = save_path.replace('.parquet', '.csv')
-                    df.to_csv(save_path, index=False)
-                    print(f"Saved to {save_path} (csv format)")
+                df_iterator = pd.read_parquet(file_path)
+                # Разбиваем на чанки вручную
+                total_rows = len(df_iterator)
+                df_iterator = [df_iterator.iloc[i:i + chunksize]
+                               for i in range(0, total_rows, chunksize)]
+            except:
+                print("Cannot read parquet in chunks, trying to read full file...")
+                df = pd.read_parquet(file_path)
+                df_iterator = [df.iloc[i:i + chunksize]
+                               for i in range(0, len(df), chunksize)]
         else:
-            df.to_csv(save_path, index=False)
-            print(f"Saved to {save_path} (csv format)")
+            df_iterator = pd.read_csv(file_path, chunksize=chunksize)
 
-        print(f"Shape: {df.shape}")
-        print(f"Memory usage: {df.memory_usage().sum() / 1024 ** 2:.2f} MB")
+        chunk_num = 0
 
-    def fit_transform(self, texts: Union[list, pd.Series], batch_size: int = 100) -> np.ndarray:
-        """
-        Обучение (если требуется) и трансформация текстов
-        Аналог sklearn интерфейса
-        """
-        return self.encode(texts, batch_size=batch_size)
+        for chunk in tqdm(df_iterator, desc="Processing chunks"):
+            try:
+                # Проверяем наличие колонки
+                if text_column not in chunk.columns:
+                    print(f"Warning: Column '{text_column}' not found in chunk {chunk_num}")
+                    print(f"Available columns: {chunk.columns.tolist()}")
+                    continue
 
-    def transform(self, texts: Union[list, pd.Series], batch_size: int = 100) -> np.ndarray:
-        """
-        Трансформация текстов (аналог sklearn интерфейса)
-        """
-        return self.encode(texts, batch_size=batch_size)
+                # Получаем эмбеддинги
+                texts = chunk[text_column].fillna('')
+                embeddings = self.encode(texts)
+
+                # Создаем DataFrame с эмбеддингами
+                embed_cols = [f'embed_{i}' for i in range(embeddings.shape[1])]
+                embed_df = pd.DataFrame(
+                    embeddings,
+                    columns=embed_cols,
+                    dtype=np.float32  # Явно указываем тип данных
+                )
+
+                # Добавляем ID если есть
+                if 'item_id' in chunk.columns:
+                    embed_df['item_id'] = chunk['item_id'].values
+                else:
+                    # Создаем индекс
+                    start_idx = chunk_num * chunksize
+                    embed_df['item_id'] = range(start_idx, start_idx + len(chunk))
+
+                # Сохраняем чанк
+                if save_format == 'parquet':
+                    save_path = Path(save_dir) / f'embeddings_chunk_{chunk_num:04d}.parquet'
+                    try:
+                        embed_df.to_parquet(save_path, compression='snappy', engine='pyarrow')
+                    except Exception as e:
+                        print(f"Failed to save as parquet: {e}")
+                        print("Trying fastparquet engine...")
+                        try:
+                            embed_df.to_parquet(save_path, compression='snappy', engine='fastparquet')
+                        except:
+                            print("Falling back to CSV format...")
+                            save_path = Path(save_dir) / f'embeddings_chunk_{chunk_num:04d}.csv'
+                            embed_df.to_csv(save_path, index=False)
+                else:
+                    save_path = Path(save_dir) / f'embeddings_chunk_{chunk_num:04d}.csv'
+                    embed_df.to_csv(save_path, index=False)
+
+                print(f"Saved chunk {chunk_num} to {save_path}")
+                chunk_num += 1
+
+                # Очистка памяти
+                del embeddings, embed_df, chunk
+                gc.collect()
+
+            except Exception as e:
+                print(f"Error processing chunk {chunk_num}: {e}")
+                chunk_num += 1
+                continue
+
+        print(f"Processed {chunk_num} chunks. Saved to {save_dir}")
+
+        # Объединение чанков
+        try:
+            self._merge_chunks(save_dir, save_format)
+        except Exception as e:
+            print(f"Failed to merge chunks: {e}")
+            print("Chunks are saved separately in the directory")
+
+    def _merge_chunks(self, save_dir: str, save_format: str = 'parquet'):
+        """Объединение чанков в один файл"""
+        import glob
+
+        # Ищем файлы чанков
+        if save_format == 'parquet':
+            chunk_files = sorted(glob.glob(f"{save_dir}/embeddings_chunk_*.parquet"))
+        else:
+            chunk_files = sorted(glob.glob(f"{save_dir}/embeddings_chunk_*.csv"))
+
+        if not chunk_files:
+            print("No chunk files found to merge")
+            return
+
+        print(f"Merging {len(chunk_files)} chunks...")
+
+        # Читаем и объединяем
+        all_chunks = []
+        for file in tqdm(chunk_files, desc="Reading chunks"):
+            try:
+                if save_format == 'parquet':
+                    chunk = pd.read_parquet(file)
+                else:
+                    chunk = pd.read_csv(file)
+                all_chunks.append(chunk)
+            except Exception as e:
+                print(f"Failed to read {file}: {e}")
+
+        if not all_chunks:
+            print("No chunks could be read")
+            return
+
+        # Объединяем
+        print("Concatenating chunks...")
+        final_df = pd.concat(all_chunks, ignore_index=True)
+
+        # Сохраняем финальный файл
+        if save_format == 'parquet':
+            final_path = Path(save_dir) / 'embeddings_final.parquet'
+            try:
+                final_df.to_parquet(final_path, compression='snappy', engine='pyarrow')
+            except:
+                try:
+                    final_df.to_parquet(final_path, compression='snappy', engine='fastparquet')
+                except:
+                    final_path = Path(save_dir) / 'embeddings_final.csv'
+                    final_df.to_csv(final_path, index=False)
+        else:
+            final_path = Path(save_dir) / 'embeddings_final.csv'
+            final_df.to_csv(final_path, index=False)
+
+        print(f"Final embeddings saved to {final_path}")
+        print(f"Shape: {final_df.shape}")
+
+        # Удаляем чанки
+        print("Cleaning up chunk files...")
+        for file in chunk_files:
+            try:
+                Path(file).unlink()
+            except:
+                pass
 
     def save_model(self, path: str):
         """Сохранение модели"""
@@ -407,56 +415,3 @@ class CPUOptimizedVectorizer:
             instance.embedding_dim = model_data['embedding_dim']
 
         return instance
-
-
-# ============================================
-# Примеры использования
-# ============================================
-
-# if __name__ == "__main__":
-#     # 1. Простое использование с DataFrame
-#     vectorizer = CPUOptimizedVectorizer(strategy='fast')
-#
-#     # Загрузка данных
-#     df = pd.read_csv('train.csv')
-#
-#     # Обработка DataFrame
-#     df_with_embeddings = vectorizer.process_dataframe(
-#         df,
-#         text_column='description',
-#         batch_size=100,
-#         add_to_original=True  # Добавить к исходным данным
-#     )
-#
-#     print(f"Result shape: {df_with_embeddings.shape}")
-#
-#     # 2. Обработка файла целиком с сохранением
-#     result = vectorizer.process_file(
-#         file_path='train.csv',
-#         text_column='description',
-#         save_path='embeddings/train_embeddings.parquet',
-#         save_format='parquet',
-#         add_to_original=False  # Сохранить только эмбеддинги
-#     )
-#
-#     # 3. Использование как sklearn
-#     texts = ["Example text 1", "Example text 2", "Example text 3"]
-#     embeddings = vectorizer.fit_transform(texts)
-#     print(f"Embeddings shape: {embeddings.shape}")
-#
-#     # 4. Сохранение и загрузка модели
-#     vectorizer.save_model('models/vectorizer.pkl')
-#     loaded_vectorizer = CPUOptimizedVectorizer.load_model('models/vectorizer.pkl')
-#
-#     # 5. Работа с разными стратегиями
-#     # Fast mode (TF-IDF)
-#     fast_vectorizer = CPUOptimizedVectorizer(strategy='fast')
-#
-#     # Balanced mode (Sentence-BERT)
-#     balanced_vectorizer = CPUOptimizedVectorizer(strategy='balanced')
-#
-#     # Quality mode (XLM-RoBERTa)
-#     quality_vectorizer = CPUOptimizedVectorizer(strategy='quality')
-#
-#     # Auto mode (автоматический выбор)
-#     auto_vectorizer = CPUOptimizedVectorizer(strategy='auto')
