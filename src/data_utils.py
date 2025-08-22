@@ -195,6 +195,8 @@ class DataProcessor:
         # Создаем копию датафрейма
         result_df = metadata.copy()
 
+        # Количество пропущенных данных
+        result_df['missing_count'] = result_df.isnull().sum(axis=1)
         # ========================================
         # 7. ПРИЗНАКИ ИЗ ТЕКСТОВЫХ ПОЛЕЙ
         # ========================================
@@ -232,8 +234,7 @@ class DataProcessor:
             result_df['name_has_dots'] = result_df['name_clean'].str.contains(r'\.\.\.', regex=True,
                                                                               na=False).astype(
                 int)  # ✅ Исправлено - добавили na=False
-            result_df['has_name'] = (result_df['name_length'] > 0).fillna(False).astype(
-                int)  # ✅ Исправлено - добавили fillna(False)
+
 
             # Обрезанное название (подозрительно)
             result_df['name_truncated'] = result_df['name_clean'].str.endswith('...', na=False).astype(
@@ -243,8 +244,7 @@ class DataProcessor:
         if 'CommercialTypeName4' in result_df.columns:
             result_df['category_clean'] = result_df['CommercialTypeName4'].fillna('').astype(str).str.strip()
             result_df['category_length'] = result_df['category_clean'].str.len()
-            result_df['has_category'] = (result_df['category_length'] > 0).fillna(False).astype(
-                int)  # ✅ Исправлено - добавили fillna(False)
+
 
         # Соответствие бренда и названия
         if 'brand_name' in result_df.columns and 'name_rus' in result_df.columns:
@@ -526,10 +526,15 @@ class DataProcessor:
             # Ценовой сегмент (логарифмическая шкала)
             result_df['price_segment'] = np.log1p(result_df['PriceDiscounted'])
 
-            # Флаги ценовых аномалий
-            price_median = result_df['PriceDiscounted'].median()
-            result_df['low_price_flag'] = (result_df['PriceDiscounted'] < price_median * 0.3).astype(int)
-            result_df['high_price_flag'] = (result_df['PriceDiscounted'] > price_median * 3).astype(int)
+            # Флаг ценовых аномалий
+            # Группируем по категории и вычисляем медиану цены для каждой категории
+            category_medians = result_df.groupby('CommercialTypeName4')['PriceDiscounted'].median()
+
+            # Создаем флаг: 1 если цена выше медианы категории, 0 если ниже
+            result_df['price_above_category_median'] = result_df.apply(
+                lambda row: 1 if row['PriceDiscounted'] > category_medians[row['CommercialTypeName4']] else 0,
+                axis=1
+            )
 
         # Стоимость возвратов
         return_value_cols = ['ExemplarReturnedValueTotal7', 'ExemplarReturnedValueTotal30',
@@ -620,6 +625,10 @@ class DataProcessor:
         result_df['items_per_order_30d'] = (
                 result_df['ExemplarAcceptedCountTotal30'] /
                 (result_df['OrderAcceptedCountTotal30'] + 1)
+        )
+        result_df['items_per_order_90d'] = (
+                result_df['ExemplarAcceptedCountTotal90'] /
+                (result_df['OrderAcceptedCountTotal90'] + 1)
         )
 
         # Процент принятия (acceptance rate)
@@ -779,15 +788,7 @@ class DataProcessor:
         # 11. СТАТИСТИЧЕСКИЕ АГРЕГАТЫ
         # ========================================
 
-        # Процент заполненности данных
-        text_fields = ['brand_name', 'name_rus', 'CommercialTypeName4']
-        filled_count = 0
-        for field in text_fields:
-            if field in result_df.columns:
-                # Check for non-empty strings as well as notna
-                filled_count += (result_df[field].notna() & (result_df[field].astype(str) != '')).astype(int)
 
-        result_df['data_completeness'] = filled_count / len(text_fields)
 
         # Активность товара (композитный показатель)
         result_df['item_activity_score'] = (
